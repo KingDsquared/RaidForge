@@ -7,6 +7,15 @@ const pool = new Pool({
 
 async function initDb() {
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS guild_settings (
+      guild_id TEXT PRIMARY KEY,
+      officer_role_id TEXT,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS raids (
       id TEXT PRIMARY KEY,
       guild_id TEXT NOT NULL,
@@ -29,8 +38,19 @@ async function initDb() {
       status TEXT NOT NULL,
       role TEXT,
       spec TEXT,
+      note TEXT,
       updated_at TIMESTAMP DEFAULT NOW(),
       PRIMARY KEY (raid_id, user_id)
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS reminders (
+      id TEXT PRIMARY KEY,
+      raid_id TEXT NOT NULL REFERENCES raids(id) ON DELETE CASCADE,
+      minutes_before INTEGER NOT NULL,
+      sent BOOLEAN DEFAULT false,
+      created_at TIMESTAMP DEFAULT NOW()
     );
   `);
 
@@ -71,23 +91,71 @@ async function initDb() {
       created_at TIMESTAMP DEFAULT NOW()
     );
   `);
+
+  await pool.query(`
+    ALTER TABLE signups
+    ADD COLUMN IF NOT EXISTS note TEXT;
+  `);
+
+  await pool.query(`
+    ALTER TABLE guild_settings
+    ADD COLUMN IF NOT EXISTS officer_role_id TEXT;
+  `);
+}
+
+async function setOfficerRole(guildId, roleId) {
+  await pool.query(
+    `
+    INSERT INTO guild_settings (guild_id, officer_role_id, updated_at)
+    VALUES ($1, $2, NOW())
+    ON CONFLICT (guild_id)
+    DO UPDATE SET officer_role_id=$2, updated_at=NOW()
+    `,
+    [guildId, roleId]
+  );
+}
+
+async function getGuildSettings(guildId) {
+  const res = await pool.query(
+    `SELECT * FROM guild_settings WHERE guild_id=$1`,
+    [guildId]
+  );
+
+  return res.rows[0] || null;
 }
 
 async function createRaid(raid) {
   await pool.query(
-    `INSERT INTO raids 
+    `
+    INSERT INTO raids
     (id, guild_id, channel_id, title, raid_time, note, created_by, status)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,'OPEN')`,
-    [raid.id, raid.guildId, raid.channelId, raid.title, raid.time, raid.note, raid.createdBy]
+    VALUES ($1,$2,$3,$4,$5,$6,$7,'OPEN')
+    `,
+    [
+      raid.id,
+      raid.guildId,
+      raid.channelId,
+      raid.title,
+      raid.time,
+      raid.note,
+      raid.createdBy
+    ]
   );
 }
 
 async function setRaidMessageId(raidId, messageId) {
-  await pool.query(`UPDATE raids SET message_id=$1 WHERE id=$2`, [messageId, raidId]);
+  await pool.query(
+    `UPDATE raids SET message_id=$1 WHERE id=$2`,
+    [messageId, raidId]
+  );
 }
 
 async function getRaid(raidId) {
-  const raidRes = await pool.query(`SELECT * FROM raids WHERE id=$1`, [raidId]);
+  const raidRes = await pool.query(
+    `SELECT * FROM raids WHERE id=$1`,
+    [raidId]
+  );
+
   if (!raidRes.rows.length) return null;
 
   const signupRes = await pool.query(
@@ -112,20 +180,24 @@ async function getRaid(raidId) {
       username: s.username,
       status: s.status,
       role: s.role,
-      spec: s.spec
+      spec: s.spec,
+      note: s.note
     }))
   };
 }
 
 async function listRaids(guildId) {
   const res = await pool.query(
-    `SELECT id, title, raid_time, status, created_at
-     FROM raids
-     WHERE guild_id=$1
-     ORDER BY created_at DESC
-     LIMIT 15`,
+    `
+    SELECT id, title, raid_time, status, created_at
+    FROM raids
+    WHERE guild_id=$1
+    ORDER BY created_at DESC
+    LIMIT 20
+    `,
     [guildId]
   );
+
   return res.rows;
 }
 
@@ -134,7 +206,11 @@ async function updateRaid(raidId, fields) {
   if (!current) return null;
 
   await pool.query(
-    `UPDATE raids SET title=$1, raid_time=$2, note=$3 WHERE id=$4`,
+    `
+    UPDATE raids
+    SET title=$1, raid_time=$2, note=$3
+    WHERE id=$4
+    `,
     [
       fields.title || current.title,
       fields.time || current.time,
@@ -147,45 +223,140 @@ async function updateRaid(raidId, fields) {
 }
 
 async function deleteRaid(raidId) {
-  await pool.query(`DELETE FROM raids WHERE id=$1`, [raidId]);
+  await pool.query(
+    `DELETE FROM raids WHERE id=$1`,
+    [raidId]
+  );
 }
 
 async function setRaidStatus(raidId, status) {
-  await pool.query(`UPDATE raids SET status=$1 WHERE id=$2`, [status, raidId]);
+  await pool.query(
+    `UPDATE raids SET status=$1 WHERE id=$2`,
+    [status, raidId]
+  );
+
   return getRaid(raidId);
 }
 
-async function upsertSignup({ raidId, userId, username, status, role, spec }) {
+async function upsertSignup({ raidId, userId, username, status, role, spec, note }) {
   await pool.query(
     `
-    INSERT INTO signups (raid_id, user_id, username, status, role, spec, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,NOW())
+    INSERT INTO signups
+    (raid_id, user_id, username, status, role, spec, note, updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
     ON CONFLICT (raid_id, user_id)
     DO UPDATE SET
       username=$3,
       status=$4,
       role=COALESCE($5, signups.role),
       spec=COALESCE($6, signups.spec),
+      note=COALESCE($7, signups.note),
       updated_at=NOW()
     `,
-    [raidId, userId, username, status, role || null, spec || null]
+    [
+      raidId,
+      userId,
+      username,
+      status,
+      role || null,
+      spec || null,
+      note || null
+    ]
   );
 
   return getRaid(raidId);
 }
 
 async function removeSignup(raidId, userId) {
-  await pool.query(`DELETE FROM signups WHERE raid_id=$1 AND user_id=$2`, [raidId, userId]);
+  await pool.query(
+    `DELETE FROM signups WHERE raid_id=$1 AND user_id=$2`,
+    [raidId, userId]
+  );
+
   return getRaid(raidId);
 }
 
-async function createTemplate(t) {
+async function addReminder(raidId, minutesBefore) {
   const id = Date.now().toString();
 
   await pool.query(
-    `INSERT INTO raid_templates (id, guild_id, name, title, note, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6)`,
-    [id, t.guildId, t.name, t.title, t.note, t.createdBy]
+    `
+    INSERT INTO reminders (id, raid_id, minutes_before, sent)
+    VALUES ($1,$2,$3,false)
+    `,
+    [id, raidId, minutesBefore]
+  );
+
+  return id;
+}
+
+async function listReminders(raidId) {
+  const res = await pool.query(
+    `
+    SELECT *
+    FROM reminders
+    WHERE raid_id=$1
+    ORDER BY minutes_before DESC
+    `,
+    [raidId]
+  );
+
+  return res.rows;
+}
+
+async function clearReminders(raidId) {
+  await pool.query(
+    `DELETE FROM reminders WHERE raid_id=$1`,
+    [raidId]
+  );
+}
+
+async function getPendingReminders() {
+  const res = await pool.query(`
+    SELECT 
+      reminders.id,
+      reminders.raid_id,
+      reminders.minutes_before,
+      reminders.sent,
+      raids.guild_id,
+      raids.channel_id,
+      raids.message_id,
+      raids.title,
+      raids.raid_time,
+      raids.status
+    FROM reminders
+    JOIN raids ON reminders.raid_id = raids.id
+    WHERE reminders.sent=false
+      AND raids.status='OPEN'
+  `);
+
+  return res.rows;
+}
+
+async function markReminderSent(reminderId) {
+  await pool.query(
+    `UPDATE reminders SET sent=true WHERE id=$1`,
+    [reminderId]
+  );
+}
+
+async function createTemplate(template) {
+  const id = Date.now().toString();
+
+  await pool.query(
+    `
+    INSERT INTO raid_templates
+    (id, guild_id, name, title, note, created_by)
+    VALUES ($1,$2,$3,$4,$5,$6)
+    `,
+    [
+      id,
+      template.guildId,
+      template.name,
+      template.title,
+      template.note,
+      template.createdBy
+    ]
   );
 
   return id;
@@ -193,7 +364,12 @@ async function createTemplate(t) {
 
 async function getTemplate(guildId, name) {
   const res = await pool.query(
-    `SELECT * FROM raid_templates WHERE guild_id=$1 AND LOWER(name)=LOWER($2) LIMIT 1`,
+    `
+    SELECT *
+    FROM raid_templates
+    WHERE guild_id=$1 AND LOWER(name)=LOWER($2)
+    LIMIT 1
+    `,
     [guildId, name]
   );
 
@@ -202,7 +378,13 @@ async function getTemplate(guildId, name) {
 
 async function listTemplates(guildId) {
   const res = await pool.query(
-    `SELECT * FROM raid_templates WHERE guild_id=$1 ORDER BY created_at DESC LIMIT 20`,
+    `
+    SELECT *
+    FROM raid_templates
+    WHERE guild_id=$1
+    ORDER BY created_at DESC
+    LIMIT 20
+    `,
     [guildId]
   );
 
@@ -212,10 +394,15 @@ async function listTemplates(guildId) {
 async function markAttendance({ raidId, userId, username, attended, markedBy }) {
   await pool.query(
     `
-    INSERT INTO attendance (raid_id, user_id, username, attended, marked_by, marked_at)
+    INSERT INTO attendance
+    (raid_id, user_id, username, attended, marked_by, marked_at)
     VALUES ($1,$2,$3,$4,$5,NOW())
     ON CONFLICT (raid_id, user_id)
-    DO UPDATE SET username=$3, attended=$4, marked_by=$5, marked_at=NOW()
+    DO UPDATE SET
+      username=$3,
+      attended=$4,
+      marked_by=$5,
+      marked_at=NOW()
     `,
     [raidId, userId, username, attended, markedBy]
   );
@@ -223,20 +410,37 @@ async function markAttendance({ raidId, userId, username, attended, markedBy }) 
 
 async function getAttendance(raidId) {
   const res = await pool.query(
-    `SELECT * FROM attendance WHERE raid_id=$1 ORDER BY username ASC`,
+    `
+    SELECT *
+    FROM attendance
+    WHERE raid_id=$1
+    ORDER BY username ASC
+    `,
     [raidId]
   );
 
   return res.rows;
 }
 
-async function linkCharacter(c) {
+async function linkCharacter(character) {
   const id = Date.now().toString();
 
   await pool.query(
-    `INSERT INTO characters (id, guild_id, user_id, region, realm, name, class_name, is_main)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [id, c.guildId, c.userId, c.region, c.realm, c.name, c.className, c.isMain]
+    `
+    INSERT INTO characters
+    (id, guild_id, user_id, region, realm, name, class_name, is_main)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+    `,
+    [
+      id,
+      character.guildId,
+      character.userId,
+      character.region,
+      character.realm,
+      character.name,
+      character.className,
+      character.isMain
+    ]
   );
 
   return id;
@@ -244,15 +448,32 @@ async function linkCharacter(c) {
 
 async function listCharacters(guildId, userId) {
   const res = await pool.query(
-    `SELECT * FROM characters WHERE guild_id=$1 AND user_id=$2 ORDER BY is_main DESC, created_at DESC`,
+    `
+    SELECT *
+    FROM characters
+    WHERE guild_id=$1 AND user_id=$2
+    ORDER BY is_main DESC, created_at DESC
+    `,
     [guildId, userId]
   );
 
   return res.rows;
 }
 
+async function getRaidExportData(raidId) {
+  const raid = await getRaid(raidId);
+  const attendance = await getAttendance(raidId);
+
+  return {
+    raid,
+    attendance
+  };
+}
+
 module.exports = {
   initDb,
+  setOfficerRole,
+  getGuildSettings,
   createRaid,
   setRaidMessageId,
   getRaid,
@@ -262,11 +483,17 @@ module.exports = {
   setRaidStatus,
   upsertSignup,
   removeSignup,
+  addReminder,
+  listReminders,
+  clearReminders,
+  getPendingReminders,
+  markReminderSent,
   createTemplate,
   getTemplate,
   listTemplates,
   markAttendance,
   getAttendance,
   linkCharacter,
-  listCharacters
+  listCharacters,
+  getRaidExportData
 };
