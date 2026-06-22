@@ -2,7 +2,7 @@ const { Pool } = require("pg");
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false
+  ssl: { rejectUnauthorized: false }
 });
 
 async function initDb() {
@@ -16,8 +16,14 @@ async function initDb() {
       raid_time TEXT NOT NULL,
       note TEXT,
       created_by TEXT NOT NULL,
+      status TEXT DEFAULT 'OPEN',
       created_at TIMESTAMP DEFAULT NOW()
     );
+  `);
+
+  await pool.query(`
+    ALTER TABLE raids
+    ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'OPEN';
   `);
 
   await pool.query(`
@@ -37,25 +43,35 @@ async function initDb() {
 async function createRaid(raid) {
   await pool.query(
     `INSERT INTO raids 
-     (id, guild_id, channel_id, title, raid_time, note, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-    [
-      raid.id,
-      raid.guildId,
-      raid.channelId,
-      raid.title,
-      raid.time,
-      raid.note,
-      raid.createdBy
-    ]
+    (id, guild_id, channel_id, title, raid_time, note, created_by, status)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,'OPEN')`,
+    [raid.id, raid.guildId, raid.channelId, raid.title, raid.time, raid.note, raid.createdBy]
   );
 }
 
 async function setRaidMessageId(raidId, messageId) {
-  await pool.query(
-    `UPDATE raids SET message_id=$1 WHERE id=$2`,
-    [messageId, raidId]
+  await pool.query(`UPDATE raids SET message_id=$1 WHERE id=$2`, [messageId, raidId]);
+}
+
+async function deleteRaid(raidId) {
+  await pool.query(`DELETE FROM raids WHERE id=$1`, [raidId]);
+}
+
+async function setRaidStatus(raidId, status) {
+  await pool.query(`UPDATE raids SET status=$1 WHERE id=$2`, [status, raidId]);
+  return getRaid(raidId);
+}
+
+async function listRaids(guildId) {
+  const res = await pool.query(
+    `SELECT id, title, raid_time, status, created_at
+     FROM raids
+     WHERE guild_id=$1
+     ORDER BY created_at DESC
+     LIMIT 10`,
+    [guildId]
   );
+  return res.rows;
 }
 
 async function getRaid(raidId) {
@@ -78,6 +94,7 @@ async function getRaid(raidId) {
     time: r.raid_time,
     note: r.note,
     createdBy: r.created_by,
+    status: r.status || "OPEN",
     signups: signupRes.rows.map(s => ({
       userId: s.user_id,
       username: s.username,
@@ -108,11 +125,7 @@ async function upsertSignup({ raidId, userId, username, status, role, spec }) {
 }
 
 async function removeSignup(raidId, userId) {
-  await pool.query(
-    `DELETE FROM signups WHERE raid_id=$1 AND user_id=$2`,
-    [raidId, userId]
-  );
-
+  await pool.query(`DELETE FROM signups WHERE raid_id=$1 AND user_id=$2`, [raidId, userId]);
   return getRaid(raidId);
 }
 
@@ -120,6 +133,9 @@ module.exports = {
   initDb,
   createRaid,
   setRaidMessageId,
+  deleteRaid,
+  setRaidStatus,
+  listRaids,
   getRaid,
   upsertSignup,
   removeSignup
