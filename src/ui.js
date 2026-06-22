@@ -12,6 +12,12 @@ function raidButtons(raidId, closed = false) {
   return [
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
+        .setCustomId(`raid:join:${raidId}`)
+        .setLabel("Sign Up")
+        .setStyle(ButtonStyle.Success)
+        .setDisabled(closed),
+
+      new ButtonBuilder()
         .setCustomId(`raid:bench:${raidId}`)
         .setLabel("Bench")
         .setStyle(ButtonStyle.Secondary)
@@ -33,13 +39,20 @@ function raidButtons(raidId, closed = false) {
         .setCustomId(`raid:absent:${raidId}`)
         .setLabel("Absence")
         .setStyle(ButtonStyle.Secondary)
+        .setDisabled(closed)
+    ),
+
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`raid:change:${raidId}`)
+        .setLabel("Change Class/Spec")
+        .setStyle(ButtonStyle.Primary)
         .setDisabled(closed),
 
       new ButtonBuilder()
-        .setCustomId(`raid:change:${raidId}`)
-        .setLabel("Change")
-        .setStyle(ButtonStyle.Primary)
-        .setDisabled(closed)
+        .setCustomId(`raid:withdraw:${raidId}`)
+        .setLabel("Withdraw")
+        .setStyle(ButtonStyle.Danger)
     )
   ];
 }
@@ -70,6 +83,7 @@ function specMenu(raidId, className) {
         .addOptions(
           specs[className].map(row => ({
             label: row.spec,
+            description: row.role,
             value: `${row.spec}|${row.role}`
           }))
         )
@@ -77,74 +91,49 @@ function specMenu(raidId, className) {
   ];
 }
 
-function roleCounts(signups = []) {
+function getCounts(signups = []) {
   const going = signups.filter(s => s.status === "Going");
 
   return {
-    tanks: going.filter(s => s.role === "Tank").length,
-    healers: going.filter(s => s.role === "Healer").length,
+    total: going.length,
+    tank: going.filter(s => s.role === "Tank").length,
+    healer: going.filter(s => s.role === "Healer").length,
     melee: going.filter(s => s.role === "Melee DPS").length,
-    ranged: going.filter(s => s.role === "Ranged DPS").length,
-    total: going.length
+    ranged: going.filter(s => s.role === "Ranged DPS").length
   };
 }
 
-function groupByClass(signups = []) {
+function renderClassRoster(signups = []) {
   const going = signups.filter(s => s.status === "Going");
-  const grouped = {};
+  if (!going.length) return "No signups yet.";
 
-  for (const cls of wowClasses) grouped[cls] = [];
-
-  for (const signup of going) {
-    const className = signup.className || signup.class_name || guessClassFromSpec(signup.spec);
-    if (!grouped[className]) grouped[className] = [];
-    grouped[className].push(signup);
-  }
-
-  return grouped;
-}
-
-function guessClassFromSpec(specText) {
-  if (!specText) return "Unknown";
-
-  for (const [className, rows] of Object.entries(specs)) {
-    if (rows.some(r => r.spec === specText || `${r.spec} ${className}` === specText)) {
-      return className;
-    }
-  }
-
-  return "Unknown";
-}
-
-function renderClassGroups(signups = []) {
-  const grouped = groupByClass(signups);
   const blocks = [];
 
-  for (const cls of Object.keys(grouped)) {
-    const players = grouped[cls];
-    if (!players.length) continue;
+  for (const cls of wowClasses) {
+    const people = going.filter(s => s.className === cls);
+    if (!people.length) continue;
 
-    const lines = players.map(p => {
+    const lines = people.map(p => {
       let line = `• ${p.username}`;
       if (p.spec) line += ` — ${p.spec}`;
       if (p.note) line += ` (${p.note})`;
       return line;
     });
 
-    blocks.push(`**${classEmoji[cls] || "•"} ${cls} (${players.length})**\n${lines.join("\n")}`);
+    blocks.push(`**${classEmoji[cls]} ${cls} (${people.length})**\n${lines.join("\n")}`);
   }
 
-  return blocks.length ? blocks.join("\n\n") : "Nobody";
+  return blocks.join("\n\n") || "No class signups yet.";
 }
 
 function renderStatus(signups = [], status) {
   const rows = signups.filter(s => s.status === status);
-
   if (!rows.length) return "Nobody";
 
   return rows.map(p => {
     let line = `• ${p.username}`;
-    if (p.spec) line += ` — ${p.spec}`;
+    if (p.className) line += ` — ${p.className}`;
+    if (p.spec) line += ` ${p.spec}`;
     if (p.note) line += ` (${p.note})`;
     return line;
   }).join("\n");
@@ -152,16 +141,17 @@ function renderStatus(signups = [], status) {
 
 function buildRaidEmbed(raid) {
   const signups = raid.signups || [];
-  const counts = roleCounts(signups);
+  const counts = getCounts(signups);
 
   return new EmbedBuilder()
-    .setTitle("Raid")
+    .setTitle(`Raid: ${raid.title}`)
     .setDescription(
-      `**${raid.title}**\n` +
-      `🗓️ ${raid.time}\n` +
-      `👥 ${counts.total} signed\n\n` +
-      `🛡️ Tanks **${counts.tanks}**   ⚔️ Melee **${counts.melee}**   🏹 Ranged **${counts.ranged}**   ✚ Healers **${counts.healers}**\n\n` +
-      `**Roster by Class**\n${renderClassGroups(signups)}`
+      `🗓️ **Time:** ${raid.time}\n` +
+      `📌 **Status:** ${raid.status}\n` +
+      `📝 **Note:** ${raid.note || "None"}\n\n` +
+      `👥 **${counts.total} signed**\n` +
+      `🛡️ Tanks **${counts.tank}**  |  ✚ Healers **${counts.healer}**  |  ⚔️ Melee **${counts.melee}**  |  🏹 Ranged **${counts.ranged}**\n\n` +
+      `__**Roster**__\n${renderClassRoster(signups)}`
     )
     .addFields(
       {
@@ -181,7 +171,7 @@ function buildRaidEmbed(raid) {
         value: renderStatus(signups, "Absent")
       }
     )
-    .setFooter({ text: `Raid ID: ${raid.id} • Status: ${raid.status}` });
+    .setFooter({ text: `Raid ID: ${raid.id}` });
 }
 
 function buildRaidListText(raids) {
@@ -230,17 +220,11 @@ function buildAttendanceText(rows) {
 
 function buildRaidExportText(exportData) {
   const { raid, attendance } = exportData;
-
   if (!raid) return "Raid not found.";
 
-  const signupLines = (raid.signups || []).map(s => {
-    let line = `${s.username} | ${s.status}`;
-    if (s.className) line += ` | ${s.className}`;
-    if (s.role) line += ` | ${s.role}`;
-    if (s.spec) line += ` | ${s.spec}`;
-    if (s.note) line += ` | ${s.note}`;
-    return line;
-  });
+  const signupLines = (raid.signups || []).map(s =>
+    `${s.username} | ${s.status} | ${s.className || ""} | ${s.role || ""} | ${s.spec || ""} | ${s.note || ""}`
+  );
 
   const attendanceLines = (attendance || []).map(a =>
     `${a.username} | ${a.attended ? "Attended" : "Missed"}`
