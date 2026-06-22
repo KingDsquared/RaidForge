@@ -53,6 +53,25 @@ async function setRaidMessageId(raidId, messageId) {
   await pool.query(`UPDATE raids SET message_id=$1 WHERE id=$2`, [messageId, raidId]);
 }
 
+async function updateRaid(raidId, fields) {
+  const current = await getRaid(raidId);
+  if (!current) return null;
+
+  await pool.query(
+    `UPDATE raids
+     SET title=$1, raid_time=$2, note=$3
+     WHERE id=$4`,
+    [
+      fields.title || current.title,
+      fields.time || current.time,
+      fields.note !== undefined ? fields.note : current.note,
+      raidId
+    ]
+  );
+
+  return getRaid(raidId);
+}
+
 async function deleteRaid(raidId) {
   await pool.query(`DELETE FROM raids WHERE id=$1`, [raidId]);
 }
@@ -133,6 +152,7 @@ module.exports = {
   initDb,
   createRaid,
   setRaidMessageId,
+  updateRaid,
   deleteRaid,
   setRaidStatus,
   listRaids,
